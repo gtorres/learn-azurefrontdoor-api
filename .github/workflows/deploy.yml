@@ -1,0 +1,152 @@
+name: Deploy
+
+on:
+  workflow_call:
+
+jobs:
+  update-infrastructure:
+    name: Update Infrastructure
+    runs-on: ubuntu-latest
+    outputs:
+      deploymentName: ${{ steps.create-resources.outputs.deploymentName }}
+      resourceGroupName: ${{ steps.create-resources.outputs.resourceGroupName }}
+    steps:
+      - name: ✔️ Checkout repo at triggering ref
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Set environment variables from script
+        shell: bash
+        run: |
+          sh $GITHUB_WORKSPACE/.github/workflows/scripts/set-env-vars.sh
+
+      - name: 🔧 Install GitVersion
+        if: github.ref != 'refs/heads/main'
+        uses: gittools/actions/gitversion/setup@v0.9.13
+        with:
+          versionSpec: '5.x'
+
+      - name: 🏃 Execute GitVersion
+        if: github.ref != 'refs/heads/main'
+        uses: gittools/actions/gitversion/execute@v0.9.13
+        with:
+          useConfigFile: true
+
+      - name: 📜 Set resource name prefix and resource group name
+        shell: bash
+        run: |
+          if [ $GITHUB_REF == 'refs/heads/main' ]; then
+            resourceNamePrefix=${{ env.RESOURCE_NAME_PREFIX_START }}
+          else
+            resourceNamePrefix=${{ env.RESOURCE_NAME_PREFIX_START }}-${{ env.GitVersion_SemVer }}
+          fi
+
+          echo "RESOURCE_GROUP_NAME=$resourceNamePrefix-rg" >> $GITHUB_ENV
+
+          . $GITHUB_WORKSPACE/.github/workflows/scripts/format-resource-name-prefix.sh
+          resourceNamePrefix=$(getFormattedResourceNamePrefix $resourceNamePrefix)
+          echo "AZURE_RESOURCE_NAME_PREFIX=$resourceNamePrefix" >> $GITHUB_ENV
+
+      - name: 🔑 Log in via Azure CLI using SP
+        if: github.ref != 'refs/heads/main'
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.SECRET_GITHUBACTIONS_AZURESP_FUNCTIONS_KEYVAULT_POC }}
+
+      - name: 🔑 Log in via Azure CLI using federated identity
+        if: github.ref == 'refs/heads/main'
+        uses: azure/login@v1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: ☁️ Create resources
+        id: create-resources
+        shell: bash
+        run: |
+          az group create -n $RESOURCE_GROUP_NAME -l westus3 --subscription ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+          az deployment group create --name $DEPLOYMENT_NAME --resource-group $RESOURCE_GROUP_NAME --template-file infra/main.bicep --parameters deploymentNameId=$DEPLOYMENT_NAME_ID resourceNamePrefix=$AZURE_RESOURCE_NAME_PREFIX isMain=$IS_MAIN logAnalyticsWorkspaceResourceId="/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourcegroups/$COMMON_RESOURCES_PREFIX-rg/providers/microsoft.operationalinsights/workspaces/$COMMON_RESOURCES_PREFIX-workspace"
+
+          echo "::set-output name=deploymentName::$DEPLOYMENT_NAME"
+          echo "::set-output name=resourceGroupName::$RESOURCE_GROUP_NAME"
+        env:
+          DEPLOYMENT_NAME_ID: ${{ github.run_id }}
+          DEPLOYMENT_NAME: 'GH_CICD_${{ github.run_id }}'
+          IS_MAIN: ${{ github.ref == 'refs/heads/main' }}
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: update-infrastructure
+    steps:
+      - name: ⬇️ Download artifacts
+        uses: actions/download-artifact@v3
+        id: download
+        with:
+          name: artifact
+          path: ./output
+
+      - name: 🔑 Log in via Azure CLI using SP
+        if: github.ref != 'refs/heads/main'
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.SECRET_GITHUBACTIONS_AZURESP_FUNCTIONS_KEYVAULT_POC }}
+
+      - name: 🔑 Log in via Azure CLI using federated identity
+        if: github.ref == 'refs/heads/main'
+        uses: azure/login@v1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: 🧲 Get function app name and app config name from deployment
+        shell: bash
+        run: |
+          echo "FUNCTION_APP_NAME=$(az deployment group show --name ${{ env.DEPLOYMENT_NAME }} --resource-group ${{ env.RESOURCE_GROUP_NAME }} --query 'properties.outputs.functionAppName.value' --output tsv)" >> $GITHUB_ENV
+          echo "APPCONFIG_NAME=$(az deployment group show --name ${{ env.DEPLOYMENT_NAME }} --resource-group ${{ env.RESOURCE_GROUP_NAME }} --query 'properties.outputs.appConfigName.value' --output tsv)" >> $GITHUB_ENV
+        env:
+          RESOURCE_GROUP_NAME: ${{ needs.update-infrastructure.outputs.resourceGroupName }}
+          DEPLOYMENT_NAME: ${{ needs.update-infrastructure.outputs.deploymentName }}
+
+      - name: 🧲 Get deployment slot name from deployment
+        if: github.ref == 'refs/heads/main'
+        run: |
+          echo "FUNCTION_APP_SLOT_NAME=$(az deployment group show --name ${{ env.DEPLOYMENT_NAME }} --resource-group ${{ env.RESOURCE_GROUP_NAME }} --query 'properties.outputs.functionAppSlotName.value' --output tsv)" >> $GITHUB_ENV
+        env:
+          RESOURCE_GROUP_NAME: ${{ needs.update-infrastructure.outputs.resourceGroupName }}
+          DEPLOYMENT_NAME: ${{ needs.update-infrastructure.outputs.deploymentName }}
+
+      - name: Download the function app's publishing profile
+        if: github.ref == 'refs/heads/main'
+        id: az_funcapp_publishing_profile
+        run: |
+          echo "FUNCTION_APP_PUB_PROFILE=$(az functionapp deployment list-publishing-profiles --subscription ${{ secrets.AZURE_SUBSCRIPTION_ID }} --resource-group ${{ env.RESOURCE_GROUP_NAME }} --name ${{ env.FUNCTION_APP_NAME }} --slot ${{ env.FUNCTION_APP_SLOT_NAME }} --xml)" >> $GITHUB_ENV
+        env:
+          RESOURCE_GROUP_NAME: ${{ needs.update-infrastructure.outputs.resourceGroupName }}
+
+      - name: 🚀 Deploy Function App
+        if: github.ref != 'refs/heads/main'
+        uses: Azure/functions-action@v1
+        id: fa-main
+        with:
+          app-name: ${{ env.FUNCTION_APP_NAME }}
+          package: './output'
+          respect-funcignore: true
+
+      - name: 🚀 Deploy Function App
+        if: github.ref == 'refs/heads/main'
+        uses: Azure/functions-action@v1
+        id: fa-other
+        with:
+          app-name: ${{ env.FUNCTION_APP_NAME }}
+          package: './output'
+          publish-profile: ${{ env.FUNCTION_APP_PUB_PROFILE }}
+          respect-funcignore: true
+
+      - name: Set appconfig keys
+        run: |
+          az appconfig kv set --key APP_VERSION --value staging --label staging --name ${{ env.APPCONFIG_NAME }} --yes
+          az appconfig kv set --key COMMIT_HASH --value ${{ github.sha }} --label staging --name ${{ env.APPCONFIG_NAME }} --yes

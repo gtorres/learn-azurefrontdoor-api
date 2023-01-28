@@ -1,0 +1,75 @@
+name: Publish release (swap deployment slots)
+
+on:
+  workflow_dispatch:
+  release:
+    types:
+      - published
+
+jobs:
+  swap-deployment-slots:
+    name: Swap Azure Function deployment slots
+    runs-on: ubuntu-latest
+    outputs:
+      resource-name-prefix: ${{ steps.set-resource-name-variables.outputs.resource-name-prefix }}
+    steps:
+      - name: 🔑 Log in via Azure CLI using SP
+        if: github.ref != 'refs/heads/main'
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.SECRET_GITHUBACTIONS_AZURESP_FUNCTIONS_KEYVAULT_POC }}
+
+      - name: ✔️ Checkout repo at main
+        uses: actions/checkout@v3
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Set environment variables from script
+        shell: bash
+        run: |
+          sh $GITHUB_WORKSPACE/.github/workflows/scripts/set-env-vars.sh
+
+      - name: 📜 Set resource name prefix and resource group name
+        id: set-resource-name-variables
+        shell: bash
+        run: |
+          resourceNamePrefix=${{ env.RESOURCE_NAME_PREFIX_START }}
+
+          echo "RESOURCE_GROUP_NAME=$resourceNamePrefix-rg" >> $GITHUB_ENV
+
+          . $GITHUB_WORKSPACE/.github/workflows/scripts/format-resource-name-prefix.sh
+          resourceNamePrefix=$(getFormattedResourceNamePrefix $resourceNamePrefix)
+          echo "AZURE_RESOURCE_NAME_PREFIX=$resourceNamePrefix" >> $GITHUB_ENV
+          echo "::set-output name=resource-name-prefix::$resourceNamePrefix"
+
+      - name: Swap staging & production deployment slots
+        shell: bash
+        run: |
+          az functionapp deployment slot swap -g $RESOURCE_GROUP_NAME -n $FUNCTION_APP_NAME --slot staging --target-slot production
+        env:
+          FUNCTION_APP_NAME: '${{ env.AZURE_RESOURCE_NAME_PREFIX }}-app'
+
+  update-app-config-settings:
+    name: Update Azure App Configuration app settings
+    runs-on: ubuntu-latest
+    needs: swap-deployment-slots
+    steps:
+      - name: Set environment variables from previous job
+        shell: bash
+        run: |
+          echo "AZURE_RESOURCE_NAME_PREFIX=${{ needs.swap-deployment-slots.outputs.resource-name-prefix }}" >> $GITHUB_ENV
+
+      - name: 🔑 Log in via Azure CLI using SP
+        if: github.ref != 'refs/heads/main'
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.SECRET_GITHUBACTIONS_AZURESP_FUNCTIONS_KEYVAULT_POC }}
+
+      - name: Set Azure Application Configuration keys "APP_VERSION" and "COMMIT_HASH"
+        shell: bash
+        run: |
+          az appconfig kv set --key APP_VERSION --value ${{ github.event.release.tag_name }} --label production --name $AZURE_APPCONFIG_NAME --yes
+          az appconfig kv set --key COMMIT_HASH --value ${{ github.sha }} --label production --name $AZURE_APPCONFIG_NAME --yes
+        env:
+          AZURE_APPCONFIG_NAME: ${{ env.AZURE_RESOURCE_NAME_PREFIX }}-appconfig

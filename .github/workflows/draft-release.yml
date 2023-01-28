@@ -1,0 +1,26 @@
+name: Draft a new release
+
+on:
+  push:
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+'
+
+jobs:
+  create-draft-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get tag from the push
+        id: set_variables
+        run: |
+          echo ::set-output name=tag::${GITHUB_REF#refs/*/}
+
+      - name: Create a new draft release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.set_variables.outputs.tag}}
+          release_name: v${{ steps.set_variables.outputs.tag }}
+          body: ${{ github.event.head_commit.message}}
+          draft: true
+          prerelease: false
