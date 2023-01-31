@@ -5,8 +5,7 @@ on:
 
 env:
   AZURE_FUNCTIONAPP_NAME: HttpTrigger1 # set this to your application's name
-  AZURE_FUNCTIONAPP_PACKAGE_PATH: '.' # set this to the path to your web app project, defaults to the repository root
-  DOTNET_VERSION: 6.0.202
+  DOTNET_VERSION: '6.0.x'
 
 jobs:
   build-and-test:
@@ -19,19 +18,22 @@ jobs:
           fetch-depth: 1
 
       - name: 🔌Setup DotNet ${{ env.DOTNET_VERSION }} Environment
-        uses: actions/setup-dotnet@v1
+        uses: actions/setup-dotnet@v3
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
       - name: 🔨 Build app
         shell: pwsh
         run: |
-          pushd './${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}'
-          dotnet build --configuration Release --output ./output
-          popd
+          dotnet restore
+          dotnet build --configuration Release
+
+      - name: Publish app
+        shell: pwsh
+        run: dotnet publish -c Release -o ${{env.DOTNET_ROOT}}/published
 
       - name: ⬆️ Upload artifacts
         uses: actions/upload-artifact@v3
         with:
           name: artifact
-          path: output
+          path: ${{env.DOTNET_ROOT}}/published
