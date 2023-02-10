@@ -15,9 +15,9 @@ param stage string = 'learn'
 
 var resourceGroupName = 'rg-${resourceNameCommonPart}'
 
-@description('Name of the app plan that will host the web API')
 var apiServiceName = '${resourceNameCommonPart}-as'
 
+@description('Name of the app plan that will host the web API')
 var appPlanName = '${resourceNameCommonPart}-asp-${uniqueString(apiServiceName, subscription().subscriptionId)}'
 // var appServicePlanResourceId = '/subscriptions/${subscription().subscriptionId}/resourceGroups/${resourceGroupName}/providers/Microsoft.Web/serverFarms/${appPlanName}'
 
