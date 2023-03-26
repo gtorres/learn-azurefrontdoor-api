@@ -59,7 +59,6 @@ jobs:
 
           . $GITHUB_WORKSPACE/.github/workflows/scripts/format-resource-name-common.sh
 
-          formattedResourceNameCommon=$(getFormattedResourceNameCommon $RESOURCE_NAME_COMMON)
           deploymentName=$DEPLOYMENT_NAME_PREFIX-$GITVERSION_SEMVER
 
           az deployment sub create -l $MAIN_REGION -n $deploymentName --subscription ${{ secrets.AZURE_SUBSCRIPTION_ID }} --template-file infra/main.bicep --parameters deploymentNamePrefix=$DEPLOYMENT_NAME_PREFIX resourceNameCommonPart=$RESOURCE_NAME_COMMON resourceGroupLocation=$MAIN_REGION appPlanLocation=$FREE_APP_SERVICE_PLAN_REGION stage=$STAGE
